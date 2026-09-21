@@ -1,4 +1,4 @@
-# LED-MQ2-PJ
+# 스마트그리드 오프가스 조기 경보 시스템
 import time
 from machine import ADC, Pin
 
