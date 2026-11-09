@@ -292,3 +292,196 @@ while True:
 ## 잘된점 : 허스키렌즈를 잘 구현함
    안된점 : 중간에 색깔인식을 다중 설정을 안해놔서 막혔다가 깃허브를 보고 알게됨
    
+## 날짜 : 2026.11.09
+
+## 오늘 한 일 : 프로젝트 거의 완성
+
+## 내용  
+import socket
+import time
+import network
+from machine import ADC, I2C, Pin
+from neopixel import NeoPixel
+
+# ----------------------------------------------------
+# 1. 시스템 및 Wi-Fi 설정
+# ----------------------------------------------------
+WIFI_SSID = "senWiFi_Free"  # 사용하는 Wi-Fi SSID
+WIFI_PASS = "sen2022!wi"  # 사용하는 Wi-Fi 비밀번호
+
+GAS_THRESHOLD = 650# MQ2 가스 농도 비상 기준 (0~65535)
+TEMP_THRESHOLD = 34  # SHT40 온도 비상 기준 (°C)
+NUM_LEDS = 10  # WS2813 LED 개수
+
+# ----------------------------------------------------
+# 2. SHT40 I2C 온습도 센서 클래스
+# ----------------------------------------------------
+class SHT40:
+
+    def __init__(self, i2c, address=0x44):
+        self.i2c = i2c
+        self.address = address
+
+    def read_temp_humi(self):
+        # High precision measurement command (0xFD)
+        self.i2c.writeto(self.address, b"\xfd")
+        time.sleep_ms(10)
+        data = self.i2c.readfrom(self.address, 6)
+
+        # Temperature calculation
+        t_ticks = (data[0] << 8) | data[1]
+        temp = -45 + (175 * t_ticks / 65535.0)
+
+        # Humidity calculation
+        rh_ticks = (data[2] << 8) | data[3]
+        humi = -6 + (125 * rh_ticks / 65535.0)
+        humi = max(0, min(100, humi))
+
+        return round(temp, 1), round(humi, 1)
+
+
+# ----------------------------------------------------
+# 3. 핀 및 하드웨어 초기화
+# ----------------------------------------------------
+# MQ2 가스 센서 (그로브 A0 -> GP26)
+mq2 = ADC(Pin(26))
+
+# SHT40 온습도 센서 (I2C0: SDA GP8, SCL GP9)
+i2c0 = I2C(0, sda=Pin(8), scl=Pin(9), freq=100000)
+sht40 = SHT40(i2c0)
+
+# WS2813 RGB LED (그로브 D18 -> GP18)
+np = NeoPixel(Pin(18), NUM_LEDS)
+
+# 허스키렌즈 ALARM/OUT 디지털 신호 (그로브 D20 -> GP20)
+huskylens_pin = Pin(20, Pin.IN, Pin.PULL_DOWN)
+
+
+def set_led_color(r, g, b):
+    for i in range(NUM_LEDS):
+        np[i] = (r, g, b)
+    np.write()
+
+
+# 초기 LED 초록색 세팅 (정상 가동)
+set_led_color(0, 255, 0)
+
+# ----------------------------------------------------
+# 4. Wi-Fi 네트워크 연결
+# ----------------------------------------------------
+wlan = network.WLAN(network.STA_IF)
+wlan.active(True)
+wlan.connect(WIFI_SSID, WIFI_PASS)
+
+print("Wi-Fi 연결 시도 중...", end="")
+while not wlan.isconnected():
+    print(".", end="")
+    time.sleep(0.5)
+
+ip_address = wlan.ifconfig()[0]
+print(f"\n[시스템 가동 완] 실시간 웹 관제 주소: http://{ip_address}")
+
+# ----------------------------------------------------
+# 5. 웹 대시보드 HTML 반응형 UI 생성
+# ----------------------------------------------------
+def generate_html(gas, temp, humi, ai_detected, is_danger):
+    status_text = "CRITICAL DANGER / FIRE ALERT" if is_danger else "NORMAL OPERATING"
+    status_bg = "#ff4d4d" if is_danger else "#2ed573"
+
+    ai_label = (
+        "<span style='color:#ff4d4d; font-weight:bold;'>⚠️ AI 이상 감지 (연기/불꽃/그을음)</span>"
+        if ai_detected
+        else "<span style='color:#2ed573;'>✅ 정상 (감지 없음)</span>"
+    )
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESS Multi-Sensor Safety Dashboard</title>
+    <style>
+        body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #12121e; color: #fff; text-align: center; padding: 15px; margin: 0; }}
+        .header {{ margin-bottom: 20px; }}
+        .card {{ background: #1e1e2d; padding: 20px; border-radius: 14px; margin: 12px auto; max-width: 420px; box-shadow: 0 4px 15px rgba(0,0,0,0.4); }}
+        .status {{ font-size: 20px; font-weight: bold; padding: 14px; border-radius: 10px; background: {status_bg}; color: #fff; letter-spacing: 1px; }}
+        .row {{ display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #2d2d3f; font-size: 16px; }}
+        .row:last-child {{ border-bottom: none; }}
+        .label {{ color: #a6adc8; }}
+        .val {{ color: #f9e2af; font-weight: bold; font-size: 18px; }}
+    </style>
+    <script>setTimeout(() => location.reload(), 1500);</script>
+</head>
+<body>
+    <div class="header">
+        <h2>⚡ ESS Rack 1 Zone Safety Monitor</h2>
+        <p style="color:#7f849c; font-size:13px;">SHT40 + MQ2 + HuskyLens AI Fusion System</p>
+    </div>
+    <div class="card"><div class="status">{status_text}</div></div>
+    <div class="card">
+        <div class="row"><span class="label">📷 HuskyLens AI 비전</span>{ai_label}</div>
+        <div class="row"><span class="label">💨 오프가스/연기 (MQ2)</span><span class="val">{gas}</span></div>
+        <div class="row"><span class="label">🌡️ 배터리 표면 온도 (SHT40)</span><span class="val">{temp} °C</span></div>
+        <div class="row"><span class="label">💧 챔버 내부 습도 (SHT40)</span><span class="val">{humi} %</span></div>
+    </div>
+    <p style="font-size:11px; color:#585b70;">1.5초 주기 자동 동기화 중</p>
+</body>
+</html>"""
+
+
+# ----------------------------------------------------
+# 6. 실시간 관제 및 웹 서버 메인 루프
+# ----------------------------------------------------
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.bind(("", 80))
+server.listen(5)
+server.settimeout(0.3)
+
+print("ESS 안전 관제 서버 시작...")
+
+while True:
+    try:
+        # 1. MQ2 가스 농도 읽기
+        gas_val = mq2.read_u16()
+
+        # 2. SHT40 온습도 센서 읽기 (I2C)
+        temp_val, humi_val = sht40.read_temp_humi()
+
+        # 3. 허스키렌즈 AI 인식 여부 읽기 (디지털 D20)
+        ai_detected = huskylens_pin.value() == 0
+        # 루프 내부에서 이 부분 바로 아래에 추가하세요
+        
+        print(f"[상태점검] 가스:{gas_val} (기준:{GAS_THRESHOLD}) | 온도:{temp_val} (기준:{TEMP_THRESHOLD}) | AI신호:{huskylens_pin.value()}")        
+        # 4. 멀티센서 융합 판단 (가스 OR 온도 OR AI 비전 이상 발생 시)
+        is_danger = (
+            (gas_val >= GAS_THRESHOLD)
+            or (temp_val >= TEMP_THRESHOLD)
+            or ai_detected
+        )
+
+        # 5. WS2813 LED 컬러 피드백
+        if is_danger:
+            set_led_color(255, 0, 0)  # 경보 발생 시 붉은색 사이렌
+        else:
+            set_led_color(0, 255, 0)  # 평시 초록색
+
+        # 6. 웹앱 접속 처리
+        try:
+            conn, addr = server.accept()
+            req = conn.recv(1024)
+            html = generate_html(
+                gas_val, temp_val, humi_val, ai_detected, is_danger
+            )
+
+            conn.send("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n")
+            conn.send(html)
+            conn.close()
+        except OSError:
+            pass  # 클라이언트 요청 대기 타임아웃 시 진행
+
+    except Exception as e:
+        print("센서 읽기 오류:", e)
+        time.sleep(1)
+
+## 잘된점 : 내가 의도한 설정값대로 특정 임계값을 넘어가게 되면 LED를 빨간색으로 하게 하여 경보를 울리게하는 시스템이 어느정도 작동함
+## 안된점 : 허스키렌즈에 불,연기 등을 학습시켜려했는데 시간이 부족해서 다음에 해야함
